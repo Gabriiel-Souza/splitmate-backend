@@ -1,12 +1,21 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'node:crypto';
+import { createServer } from 'node:http';
+import { Server } from 'socket.io';
 import { Table, Participant, Item } from './types.js';
 import { calculateTableSummary } from './calculator.js';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin: '*',
+  },
+});
 
 // In-memory storage (equivalent to [String: Table] in Swift)
 const tables = new Map<string, Table>();
@@ -19,6 +28,31 @@ function generateTableCode(): string {
   }
   return tables.has(code) ? generateTableCode() : code;
 }
+
+function broadcastTableUpdate(code: string, table: Table): void {
+  io.to(code).emit('tableUpdated', {
+    table,
+    summary: calculateTableSummary(table),
+  });
+}
+
+// WebSocket room management
+io.on('connection', (socket) => {
+  socket.on('joinTable', (rawCode: string) => {
+    if (typeof rawCode !== 'string') return;
+    const code = rawCode.trim().toUpperCase();
+    const table = tables.get(code);
+    if (!table) return;
+
+    socket.join(code);
+
+    // Immediately send the latest state back (crucial when iOS Safari wakes up and reconnects)
+    socket.emit('tableUpdated', {
+      table,
+      summary: calculateTableSummary(table),
+    });
+  });
+});
 
 app.get('/api/hello', (_req, res) => {
   res.json({ message: 'SplitMate API online!' });
@@ -86,6 +120,7 @@ app.post('/api/tables/:code/participants', (req, res) => {
   };
 
   table.participants.push(newParticipant);
+  broadcastTableUpdate(code, table);
   res.status(201).json(table);
 });
 
@@ -127,6 +162,7 @@ app.post('/api/tables/:code/items', (req, res) => {
   };
 
   table.items.push(newItem);
+  broadcastTableUpdate(code, table);
   res.status(201).json(table);
 });
 
@@ -141,6 +177,7 @@ app.delete('/api/tables/:code/items/:itemId', (req, res) => {
   }
 
   table.items = table.items.filter((item) => item.id !== req.params.itemId);
+  broadcastTableUpdate(code, table);
   res.json(table);
 });
 
@@ -161,6 +198,7 @@ app.patch('/api/tables/:code/service-fee', (req, res) => {
   }
 
   table.serviceFeeEnabled = enabled;
+  broadcastTableUpdate(code, table);
   res.json(table);
 });
 
@@ -179,4 +217,4 @@ app.get('/api/tables/:code/summary', (req, res) => {
 });
 
 const PORT = 3000;
-app.listen(PORT, () => console.log(`SplitMate API running on http://localhost:${PORT}`));
+httpServer.listen(PORT, () => console.log(`SplitMate API + WebSocket running on http://localhost:${PORT}`));
